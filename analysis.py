@@ -13,17 +13,14 @@ SYMBOLS = [
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
-CACHE_TTL = 720  # 12 minutes
+CACHE_TTL = 720
 
 def _get_cache_file(symbol: str) -> Path:
     safe_name = symbol.replace(":", "_").replace("/", "_")
     return CACHE_DIR / f"{safe_name}_4h.json"
 
 def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
-    """Direct API call + fixed JSON cache"""
     cache_file = _get_cache_file(symbol)
-    
-    # Try cache first
     if cache_file.exists():
         try:
             with open(cache_file) as f:
@@ -33,7 +30,7 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 return df
         except:
-            pass  # bad cache, ignore
+            pass
 
     try:
         url = "https://api.hyperliquid.xyz/info"
@@ -63,7 +60,6 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
         df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
         df = df.tail(num_candles).reset_index(drop=True)
 
-        # FIXED: Make cache JSON serializable
         cache_data = df.copy()
         cache_data['timestamp'] = cache_data['timestamp'].astype(str)
         with open(cache_file, "w") as f:
@@ -79,7 +75,8 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
         return df
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    if len(df) < 60: return df
+    if len(df) < 60: 
+        return df
     df = df.copy()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     tr = pd.concat([df['high']-df['low'], (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(axis=1)
@@ -100,7 +97,7 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
         error = df.attrs.get('error', 'No candles returned') if hasattr(df, 'attrs') else "Insufficient data"
         return {"bias": "neutral", "confidence": 0, "reason": f"❌ ERROR: {error}", "target": None, "sl": None}
     
-    df = add_indicators(df)
+    df = add_indicators(df)   # ← Now guaranteed when data exists
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
     atr = float(df['atr'].iloc[-1]) if not pd.isna(df['atr'].iloc[-1]) else 1.0
@@ -151,6 +148,8 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
 
 def get_full_analysis(symbol: str):
     df = fetch_candles(symbol)
+    if not df.empty:
+        df = add_indicators(df)   # ← FIXED: Always add EMA50 for the chart
     analysis = quantum_weighted_confluence(df)
     analysis["symbol"] = symbol
     analysis["df"] = df
