@@ -1,12 +1,24 @@
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
+import json
+from pathlib import Path
 from analysis import get_full_analysis, SYMBOLS
 from datetime import datetime
 
 st.set_page_config(page_title="Hyperliquid Quantum Analyzer", layout="wide", page_icon="⚡")
 st.title("⚡ Hyperliquid 4H Quantum Weighted Analyzer")
-st.caption("Direct API • Bulletproof error handling • Pure SMC/ICT")
+st.caption("One-Time Setup Alerts • Structural Reset Logic • Live Active Signal Status")
+
+# Load current signal state
+def load_signal_state():
+    try:
+        with open("signal_state.json") as f:
+            return json.load(f)
+    except:
+        return {}
+
+state = load_signal_state()
 
 st.sidebar.header("⚡ Choose Symbol")
 default_idx = SYMBOLS.index("xyz:NVDA")
@@ -16,16 +28,13 @@ custom = st.sidebar.text_input("Or type custom symbol (e.g. BTC)", "")
 symbol = custom.strip() or selected
 
 if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
-    with st.spinner("Fetching 4H data from Hyperliquid..."):
+    with st.spinner("Fetching 4H data + Quantum analysis..."):
         result = get_full_analysis(symbol)
 
-    # ───── BULLETPROOF CHECK ─────
-    if not result or not isinstance(result.get("df"), pd.DataFrame) or result["df"].empty:
+    if not result or result.get("df") is None or result.get("df").empty:
         st.error("❌ No data received from Hyperliquid")
         if result and "reason" in result:
             st.error(result["reason"])
-        elif result and "error" in result:
-            st.error(result.get("error", "Unknown error"))
         st.stop()
 
     df = result["df"]
@@ -53,8 +62,27 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
 
     with col2:
         st.subheader("🔥 Quantum Analysis")
+
+        # === ACTIVE SIGNAL STATUS ===
+        active = state.get(symbol)
+        if active:
+            bias_color = "🟢" if active["last_bias"] == "bullish" else "🔴"
+            st.success(f"{bias_color} **ACTIVE {active['last_bias'].upper()} SIGNAL**")
+            st.caption(f"Triggered near {active.get('last_price')}")
+            st.write(f"**Target:** `{active.get('last_target')}`")
+            st.write(f"**Stop Loss:** `{active.get('last_sl')}`")
+        else:
+            st.info("ℹ️ No active signal on this symbol")
+
+        # Current quantum analysis
         color = "🟢" if a["bias"] == "bullish" else "🔴"
-        st.metric("Bias", f"{color} {a['bias'].upper()}", f"Confidence: {a['confidence']}%")
-        st.write("**Reason:**", a.get("reason", "No reason"))
+        st.metric("Current Bias", f"{color} {a['bias'].upper()}", f"Confidence: {a['confidence']}%")
+
+        st.write("**Reason:**", a.get("reason", "N/A"))
         st.code(f"Price: {a.get('current_price')}\nTarget: {a.get('target')}\nSL: {a.get('sl')}")
-        st.link_button("📊 Open Hyperliquid Chart", f"https://app.hyperliquid.xyz/trade/{symbol}", use_container_width=True)
+
+        st.link_button("📊 Open Hyperliquid Chart", 
+                      f"https://app.hyperliquid.xyz/trade/{symbol}", 
+                      use_container_width=True)
+
+        st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S UTC')}")
