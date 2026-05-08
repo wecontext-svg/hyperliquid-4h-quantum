@@ -7,49 +7,76 @@ from datetime import datetime
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+# List of working symbols (xyz: prefix = HIP-3 markets)
 SYMBOLS = [
-    "xyz:SP500", "xyz:MU", "xyz:SNDK", "xyz:NVDA", "xyz:INTC",
-    "xyz:GOOGL", "xyz:AMD", "xyz:AAPL", "xyz:AMZN", "xyz:ORCL",
-    "xyz:HOOD", "xyz:MSFT", "xyz:PLTR", "xyz:EWY"
+    "xyz:SP500", "xyz:NVDA", "xyz:AAPL", "xyz:GOOGL", "xyz:AMZN",
+    "xyz:MSFT", "xyz:PLTR", "xyz:HOOD", "xyz:AMD", "xyz:INTC",
+    "xyz:ORCL", "xyz:MU", "xyz:EWY", "xyz:SNDK"
 ]
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
-CACHE_TTL = 720
+CACHE_TTL = 720  # 12 minutes
 
 def _get_cache_file(symbol: str) -> Path:
     safe_name = symbol.replace(":", "_").replace("/", "_")
     return CACHE_DIR / f"{safe_name}_4h.json"
 
 def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
+    """Improved version with FULL error message for debugging"""
     cache_file = _get_cache_file(symbol)
+    
+    # Use cache if fresh
     if cache_file.exists():
         with open(cache_file) as f:
             cached = json.load(f)
         if time.time() - cached["timestamp"] < CACHE_TTL:
             return pd.DataFrame(cached["data"])
+
     try:
         info = Info(constants.MAINNET_API_URL, skip_ws=True)
         end_time = int(time.time() * 1000)
         interval_ms = 4 * 60 * 60 * 1000
         start_time = end_time - (num_candles + 50) * interval_ms
-        raw = info.candles_snapshot(name=symbol, interval="4h", startTime=start_time, endTime=end_time)
-        if not raw:
-            raise ValueError("No data")
+
+        raw = info.candles_snapshot(
+            name=symbol,
+            interval="4h",
+            startTime=start_time,
+            endTime=end_time
+        )
+
+        if not raw or len(raw) == 0:
+            raise Exception(f"Hyperliquid returned no candles for {symbol}. Symbol may not exist yet or has no 4H history.")
+
         df = pd.DataFrame([{
             'timestamp': pd.to_datetime(c['t'], unit='ms'),
             'open': float(c['o']), 'high': float(c['h']),
             'low': float(c['l']), 'close': float(c['c']),
             'volume': float(c.get('v', 0))
         } for c in raw])
+
         df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
         df = df.tail(num_candles).reset_index(drop=True)
+
+        # Save cache
         with open(cache_file, "w") as f:
             json.dump({"timestamp": time.time(), "data": df.to_dict(orient="records")}, f)
+
+        print(f"✅ Successfully fetched {len(df)} candles for {symbol}")
         return df
+
     except Exception as e:
-        print(f"⚠️ Fetch error {symbol}: {e}")
-        return pd.DataFrame()
+        error_msg = str(e)
+        print(f"❌ Fetch error for {symbol}: {error_msg}")
+        # Return empty DF with error info so Streamlit can show it
+        df = pd.DataFrame()
+        df.attrs['error'] = error_msg
+        return df
+
+# ... (the rest of the file stays exactly the same - quantum logic etc.)
+# I kept the rest of your original functions unchanged for simplicity.
+# Paste the FULL file below this line (the quantum_weighted_confluence and get_full_analysis functions)
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < 60: return df
@@ -70,7 +97,9 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
 
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
-        return {"bias": "neutral", "confidence": 0, "reason": "Insufficient data", "target": None, "sl": None}
+        error = df.attrs.get('error', 'Insufficient data') if hasattr(df, 'attrs') else "No candles"
+        return {"bias": "neutral", "confidence": 0, "reason": f"ERROR: {error}", "target": None, "sl": None}
+    # (rest of your quantum logic stays the same - unchanged)
     df = add_indicators(df)
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
@@ -122,7 +151,8 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
 
 def get_full_analysis(symbol: str):
     df = fetch_candles(symbol)
-    if df.empty: return None
+    if df.empty:
+        return None
     analysis = quantum_weighted_confluence(df)
     analysis["symbol"] = symbol
     analysis["df"] = df
