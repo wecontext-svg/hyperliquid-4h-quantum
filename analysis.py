@@ -2,10 +2,9 @@ import pandas as pd
 import numpy as np
 import time
 import json
+import requests
 from pathlib import Path
 from datetime import datetime
-from hyperliquid.info import Info
-from hyperliquid.utils import constants
 
 SYMBOLS = [
     "xyz:SP500", "xyz:MU", "xyz:SNDK", "xyz:NVDA", "xyz:INTC",
@@ -22,6 +21,7 @@ def _get_cache_file(symbol: str) -> Path:
     return CACHE_DIR / f"{safe_name}_4h.json"
 
 def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
+    """Direct HTTP call — much more reliable on Streamlit Cloud"""
     cache_file = _get_cache_file(symbol)
     if cache_file.exists():
         try:
@@ -30,23 +30,25 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
             if time.time() - cached["timestamp"] < CACHE_TTL:
                 return pd.DataFrame(cached["data"])
         except:
-            pass  # ignore bad cache
+            pass
 
     try:
-        info = Info(constants.MAINNET_API_URL, skip_ws=True)
-        end_time = int(time.time() * 1000)
-        interval_ms = 4 * 60 * 60 * 1000
-        start_time = end_time - (num_candles + 50) * interval_ms
-
-        raw = info.candles_snapshot(
-            name=symbol,
-            interval="4h",
-            startTime=start_time,
-            endTime=end_time
-        )
+        url = "https://api.hyperliquid.xyz/info"
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": "4h",
+                "startTime": int(time.time() * 1000) - (num_candles + 50) * 4 * 3600 * 1000,
+                "endTime": int(time.time() * 1000)
+            }
+        }
+        response = requests.post(url, json=payload, timeout=15)
+        response.raise_for_status()
+        raw = response.json()
 
         if not raw or len(raw) == 0:
-            raise Exception(f"Hyperliquid returned ZERO candles for {symbol}. This symbol may have no 4H history yet.")
+            raise Exception(f"Hyperliquid returned ZERO candles for {symbol}")
 
         df = pd.DataFrame([{
             'timestamp': pd.to_datetime(c['t'], unit='ms'),
@@ -65,7 +67,7 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ DEBUG ERROR for {symbol}: {error_msg}")
+        print(f"❌ ERROR for {symbol}: {error_msg}")
         df = pd.DataFrame()
         df.attrs['error'] = error_msg
         return df
@@ -90,8 +92,11 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
         error = df.attrs.get('error', 'No candles returned') if hasattr(df, 'attrs') else "Insufficient data"
-        return {"bias": "neutral", "confidence": 0, "reason": f"ERROR: {error}", "target": None, "sl": None}
-    # ... (quantum logic unchanged)
+        return {
+            "bias": "neutral", "confidence": 0, "reason": f"❌ ERROR: {error}",
+            "target": None, "sl": None, "error": True
+        }
+    # Quantum logic (unchanged)
     df = add_indicators(df)
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
@@ -143,8 +148,6 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
 
 def get_full_analysis(symbol: str):
     df = fetch_candles(symbol)
-    if df.empty:
-        return None
     analysis = quantum_weighted_confluence(df)
     analysis["symbol"] = symbol
     analysis["df"] = df
