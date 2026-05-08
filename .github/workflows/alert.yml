@@ -1,7 +1,5 @@
 name: Quantum 4H Alerts
 on:
-  schedule:
-    - cron: '5 * * * *'     # ← Runs at :05 every hour (much more reliable)
   workflow_dispatch:        # Allows manual trigger anytime
 jobs:
   quantum_scan:
