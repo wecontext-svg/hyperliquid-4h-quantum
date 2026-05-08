@@ -7,31 +7,30 @@ from datetime import datetime
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-# List of working symbols (xyz: prefix = HIP-3 markets)
 SYMBOLS = [
-    "xyz:SP500", "xyz:NVDA", "xyz:AAPL", "xyz:GOOGL", "xyz:AMZN",
-    "xyz:MSFT", "xyz:PLTR", "xyz:HOOD", "xyz:AMD", "xyz:INTC",
-    "xyz:ORCL", "xyz:MU", "xyz:EWY", "xyz:SNDK"
+    "xyz:SP500", "xyz:MU", "xyz:SNDK", "xyz:NVDA", "xyz:INTC",
+    "xyz:GOOGL", "xyz:AMD", "xyz:AAPL", "xyz:AMZN", "xyz:ORCL",
+    "xyz:HOOD", "xyz:MSFT", "xyz:PLTR", "xyz:EWY"
 ]
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
-CACHE_TTL = 720  # 12 minutes
+CACHE_TTL = 720
 
 def _get_cache_file(symbol: str) -> Path:
     safe_name = symbol.replace(":", "_").replace("/", "_")
     return CACHE_DIR / f"{safe_name}_4h.json"
 
 def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
-    """Improved version with FULL error message for debugging"""
     cache_file = _get_cache_file(symbol)
-    
-    # Use cache if fresh
     if cache_file.exists():
-        with open(cache_file) as f:
-            cached = json.load(f)
-        if time.time() - cached["timestamp"] < CACHE_TTL:
-            return pd.DataFrame(cached["data"])
+        try:
+            with open(cache_file) as f:
+                cached = json.load(f)
+            if time.time() - cached["timestamp"] < CACHE_TTL:
+                return pd.DataFrame(cached["data"])
+        except:
+            pass  # ignore bad cache
 
     try:
         info = Info(constants.MAINNET_API_URL, skip_ws=True)
@@ -47,7 +46,7 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
         )
 
         if not raw or len(raw) == 0:
-            raise Exception(f"Hyperliquid returned no candles for {symbol}. Symbol may not exist yet or has no 4H history.")
+            raise Exception(f"Hyperliquid returned ZERO candles for {symbol}. This symbol may have no 4H history yet.")
 
         df = pd.DataFrame([{
             'timestamp': pd.to_datetime(c['t'], unit='ms'),
@@ -59,24 +58,17 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
         df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
         df = df.tail(num_candles).reset_index(drop=True)
 
-        # Save cache
         with open(cache_file, "w") as f:
             json.dump({"timestamp": time.time(), "data": df.to_dict(orient="records")}, f)
 
-        print(f"✅ Successfully fetched {len(df)} candles for {symbol}")
         return df
 
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ Fetch error for {symbol}: {error_msg}")
-        # Return empty DF with error info so Streamlit can show it
+        print(f"❌ DEBUG ERROR for {symbol}: {error_msg}")
         df = pd.DataFrame()
         df.attrs['error'] = error_msg
         return df
-
-# ... (the rest of the file stays exactly the same - quantum logic etc.)
-# I kept the rest of your original functions unchanged for simplicity.
-# Paste the FULL file below this line (the quantum_weighted_confluence and get_full_analysis functions)
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df) < 60: return df
@@ -97,9 +89,9 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
 
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
-        error = df.attrs.get('error', 'Insufficient data') if hasattr(df, 'attrs') else "No candles"
+        error = df.attrs.get('error', 'No candles returned') if hasattr(df, 'attrs') else "Insufficient data"
         return {"bias": "neutral", "confidence": 0, "reason": f"ERROR: {error}", "target": None, "sl": None}
-    # (rest of your quantum logic stays the same - unchanged)
+    # ... (quantum logic unchanged)
     df = add_indicators(df)
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
