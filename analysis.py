@@ -4,7 +4,6 @@ import time
 import json
 import requests
 from pathlib import Path
-from datetime import datetime
 
 SYMBOLS = [
     "xyz:SP500", "xyz:MU", "xyz:SNDK", "xyz:NVDA", "xyz:INTC",
@@ -14,23 +13,27 @@ SYMBOLS = [
 
 CACHE_DIR = Path(".cache")
 CACHE_DIR.mkdir(exist_ok=True)
-CACHE_TTL = 720
+CACHE_TTL = 720  # 12 minutes
 
 def _get_cache_file(symbol: str) -> Path:
     safe_name = symbol.replace(":", "_").replace("/", "_")
     return CACHE_DIR / f"{safe_name}_4h.json"
 
 def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
-    """Direct HTTP call — much more reliable on Streamlit Cloud"""
+    """Direct API call + fixed JSON cache"""
     cache_file = _get_cache_file(symbol)
+    
+    # Try cache first
     if cache_file.exists():
         try:
             with open(cache_file) as f:
                 cached = json.load(f)
             if time.time() - cached["timestamp"] < CACHE_TTL:
-                return pd.DataFrame(cached["data"])
+                df = pd.DataFrame(cached["data"])
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                return df
         except:
-            pass
+            pass  # bad cache, ignore
 
     try:
         url = "https://api.hyperliquid.xyz/info"
@@ -60,8 +63,11 @@ def fetch_candles(symbol: str, num_candles: int = 180) -> pd.DataFrame:
         df = df.sort_values('timestamp').drop_duplicates(subset=['timestamp']).reset_index(drop=True)
         df = df.tail(num_candles).reset_index(drop=True)
 
+        # FIXED: Make cache JSON serializable
+        cache_data = df.copy()
+        cache_data['timestamp'] = cache_data['timestamp'].astype(str)
         with open(cache_file, "w") as f:
-            json.dump({"timestamp": time.time(), "data": df.to_dict(orient="records")}, f)
+            json.dump({"timestamp": time.time(), "data": cache_data.to_dict(orient="records")}, f)
 
         return df
 
@@ -92,11 +98,8 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
         error = df.attrs.get('error', 'No candles returned') if hasattr(df, 'attrs') else "Insufficient data"
-        return {
-            "bias": "neutral", "confidence": 0, "reason": f"❌ ERROR: {error}",
-            "target": None, "sl": None, "error": True
-        }
-    # Quantum logic (unchanged)
+        return {"bias": "neutral", "confidence": 0, "reason": f"❌ ERROR: {error}", "target": None, "sl": None}
+    
     df = add_indicators(df)
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
