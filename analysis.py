@@ -93,30 +93,25 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
     return highs[-8:], lows[-8:]
 
 def get_structure_score(df, swing_highs, swing_lows, current_price):
-    # Phase 1: New swing-based BOS/CHOCH logic (as per your spec)
+    # Phase 1: New swing-based BOS/CHOCH logic
     if len(swing_highs) < 3 or len(swing_lows) < 3:
         return 50, "mixed"
 
-    # Last 6 swings
     recent_highs = swing_highs[-6:]
     recent_lows = swing_lows[-6:]
 
-    # Determine last confirmed swing high/low
     last_swing_high = recent_highs[-1]['price'] if recent_highs else 0
     last_swing_low = recent_lows[-1]['price'] if recent_lows else 0
 
-    # Check for BOS / CHOCH
     bullish_bos = current_price > last_swing_high and df['close'].iloc[-1] > last_swing_high
     bearish_bos = current_price < last_swing_low and df['close'].iloc[-1] < last_swing_low
 
-    # Simple sequence check for CHOCH (using last 2 swings)
+    bullish_choch = bearish_choch = False
     if len(recent_highs) >= 2 and len(recent_lows) >= 2:
         prev_high = recent_highs[-2]['price']
         prev_low = recent_lows[-2]['price']
-        bullish_choch = (current_price > prev_low) and (df['close'].iloc[-1] > prev_low)  # reversal from bearish
+        bullish_choch = (current_price > prev_low) and (df['close'].iloc[-1] > prev_low)
         bearish_choch = (current_price < prev_high) and (df['close'].iloc[-1] < prev_high)
-    else:
-        bullish_choch = bearish_choch = False
 
     if bullish_bos:
         score = 90
@@ -131,13 +126,55 @@ def get_structure_score(df, swing_highs, swing_lows, current_price):
         score = 25
         tag = "CHOCH"
     else:
-        # Trending continuation or mixed
         hh_hl = df['high'].iloc[-1] > df['high'].iloc[-2] and df['low'].iloc[-1] > df['low'].iloc[-2]
         lh_ll = df['high'].iloc[-1] < df['high'].iloc[-2] and df['low'].iloc[-1] < df['low'].iloc[-2]
         score = 65 if hh_hl else 35 if lh_ll else 50
         tag = "continuation" if (hh_hl or lh_ll) else "mixed"
 
     return score, tag
+
+# === PHASE 2: Order Block Detection ===
+def detect_order_block(df: pd.DataFrame, structure_tag: str, bias: str):
+    if len(df) < 10:
+        return None, 10
+
+    # Simple OB detection based on last opposing candle before recent move
+    last_candle = df.iloc[-1]
+    for i in range(len(df)-10, len(df)-2):
+        candle = df.iloc[i]
+        # Bullish OB: last red candle before bullish move
+        if bias == "bullish" and candle['close'] < candle['open']:
+            return {
+                'top': max(candle['open'], candle['close']),
+                'bottom': min(candle['open'], candle['close']),
+                'index': i
+            }, 85
+        # Bearish OB: last green candle before bearish move
+        if bias == "bearish" and candle['close'] > candle['open']:
+            return {
+                'top': max(candle['open'], candle['close']),
+                'bottom': min(candle['open'], candle['close']),
+                'index': i
+            }, 85
+    return None, 10
+
+# === PHASE 2: Fair Value Gap (FVG) Detection ===
+def detect_fvg(df: pd.DataFrame):
+    fvgs = []
+    for i in range(2, len(df)):
+        # Bullish FVG
+        if df['high'].iloc[i-2] < df['low'].iloc[i]:
+            gap_top = df['high'].iloc[i-2]
+            gap_bottom = df['low'].iloc[i]
+            midpoint = (gap_top + gap_bottom) / 2
+            fvgs.append({'type': 'bullish', 'top': gap_top, 'bottom': gap_bottom, 'mid': midpoint, 'index': i})
+        # Bearish FVG
+        elif df['low'].iloc[i-2] > df['high'].iloc[i]:
+            gap_top = df['low'].iloc[i-2]
+            gap_bottom = df['high'].iloc[i]
+            midpoint = (gap_top + gap_bottom) / 2
+            fvgs.append({'type': 'bearish', 'top': gap_top, 'bottom': gap_bottom, 'mid': midpoint, 'index': i})
+    return fvgs[-5:]  # last 5 FVGs
 
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
@@ -152,29 +189,55 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     sell_liq = [h['price'] for h in swing_highs if h['price'] > current_price][-3:] or [current_price * 1.02]
     buy_liq = [l['price'] for l in swing_lows if l['price'] < current_price][-3:] or [current_price * 0.98]
     last, prev = df.iloc[-1], df.iloc[-2]
+
+    # Structure
+    structure_score, structure_tag = get_structure_score(df, swing_highs, swing_lows, current_price)
+
+    # Order Block (Phase 2)
+    ob, ob_score = detect_order_block(df, structure_tag, "bullish" if structure_score > 50 else "bearish")
+    order_block_score = ob_score
+
+    # FVG (Phase 2)
+    fvgs = detect_fvg(df)
+    fvg_score = 10
+    if fvgs:
+        for fvg in fvgs:
+            if fvg['type'] == 'bullish' and current_price > fvg['bottom'] and current_price < fvg['top']:
+                fvg_score = 95
+                break
+            elif fvg['type'] == 'bearish' and current_price < fvg['top'] and current_price > fvg['bottom']:
+                fvg_score = 95
+                break
+
+    # Remaining old factors (temporary)
     body = abs(last['close'] - last['open'])
     pinbar_bull = (last['low'] - min(last['open'], last['close'])) > 2 * body and last['close'] > last['open']
     pinbar_bear = (max(last['open'], last['close']) - last['high']) > 2 * body and last['close'] < last['open']
     engulf_bull = last['close'] > prev['high'] and last['open'] < prev['close']
     engulf_bear = last['close'] < prev['low'] and last['open'] > prev['close']
 
-    structure_score, structure_tag = get_structure_score(df, swing_highs, swing_lows, current_price)
-
     factors = {
         "structure": structure_score,
+        "order_block": order_block_score,
+        "fvg": fvg_score,
         "liquidity": 95 if (last['low'] < buy_liq[0] and last['close'] > buy_liq[0]) else 95 if (last['high'] > sell_liq[0] and last['close'] < sell_liq[0]) else 40,
         "ema": 85 if current_price > ema50 else 15,
         "pattern": 90 if (pinbar_bull or engulf_bull) else 90 if (pinbar_bear or engulf_bear) else 45,
         "volatility": min(100, int(atr / current_price * 10000))
     }
-    weights = np.array([0.40, 0.30, 0.15, 0.10, 0.05])  # V2 weights start here, but Phase 1 keeps old for other factors
-    # Linear normalization (Priority 1 - removed square root)
+
+    # Updated weights for Phase 2
+    weights = np.array([0.35, 0.20, 0.15, 0.15, 0.07, 0.05, 0.03])  # Structure, OB, FVG, Liq, EMA, Pattern, Vol
+
     factor_array = np.array(list(factors.values())) / 100.0
     raw_score = np.dot(factor_array, weights) * 100
+
     entanglement = 1.25 if sum(1 for v in factors.values() if v > 80) >= 3 else 1.0
     quantum_score = int(raw_score * entanglement)
+
     bias = "bullish" if quantum_score > 65 else "bearish" if quantum_score < 35 else "neutral"
     confidence = max(40, min(98, quantum_score))
+
     if bias == "bullish":
         target = current_price + 3 * atr
         sl = min(buy_liq) - 0.5 * atr
@@ -183,16 +246,24 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
         sl = max(sell_liq) + 0.5 * atr
     else:
         target = sl = current_price
-    reasons = [f"{k.capitalize()}:{v} ({structure_tag})" for k, v in factors.items() if v > 60][:4]
+
+    reasons = [f"{k.capitalize()}:{v}" for k, v in factors.items() if v > 60][:5]
     reason_str = " | ".join(reasons) + f" | Entangle×{entanglement:.2f}"
+
     return {
-        "bias": bias, "confidence": confidence, "reason": reason_str,
-        "target": round(target, 2), "sl": round(sl, 2),
-        "current_price": round(current_price, 2), "ema50": round(ema50, 2),
+        "bias": bias, 
+        "confidence": confidence, 
+        "reason": reason_str,
+        "target": round(target, 2), 
+        "sl": round(sl, 2),
+        "current_price": round(current_price, 2), 
+        "ema50": round(ema50, 2),
         "buy_liquidity": [round(x, 2) for x in buy_liq],
         "sell_liquidity": [round(x, 2) for x in sell_liq],
         "quantum_score": quantum_score,
-        "structure_tag": structure_tag  # new output
+        "structure_tag": structure_tag,
+        "order_block": ob,
+        "fvg_detected": len(fvgs) > 0
     }
 
 def get_full_analysis(symbol: str):
