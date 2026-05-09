@@ -1,24 +1,13 @@
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-import json
 from pathlib import Path
 from analysis import get_full_analysis, SYMBOLS
 from datetime import datetime
 
 st.set_page_config(page_title="Hyperliquid Quantum Analyzer", layout="wide", page_icon="⚡")
 st.title("⚡ Hyperliquid 4H Quantum Weighted Analyzer")
-st.caption("One-Time Setup Alerts • Structural Reset Logic • Live Active Signal Status")
-
-# Load current signal state
-def load_signal_state():
-    try:
-        with open("signal_state.json") as f:
-            return json.load(f)
-    except:
-        return {}
-
-state = load_signal_state()
+st.caption("Pure Analysis Dashboard • No alerts")
 
 st.sidebar.header("⚡ Choose Symbol")
 default_idx = SYMBOLS.index("xyz:NVDA")
@@ -63,18 +52,6 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
     with col2:
         st.subheader("🔥 Quantum Analysis")
 
-        # === ACTIVE SIGNAL STATUS ===
-        active = state.get(symbol)
-        if active:
-            bias_color = "🟢" if active["last_bias"] == "bullish" else "🔴"
-            st.success(f"{bias_color} **ACTIVE {active['last_bias'].upper()} SIGNAL**")
-            st.caption(f"Triggered near {active.get('last_price')}")
-            st.write(f"**Target:** `{active.get('last_target')}`")
-            st.write(f"**Stop Loss:** `{active.get('last_sl')}`")
-        else:
-            st.info("ℹ️ No active signal on this symbol")
-
-        # Current quantum analysis
         color = "🟢" if a["bias"] == "bullish" else "🔴"
         st.metric("Current Bias", f"{color} {a['bias'].upper()}", f"Confidence: {a['confidence']}%")
 
