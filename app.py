@@ -1,3 +1,9 @@
+if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
+    with st.spinner("Running Quantum V2 Analysis..."):
+        r = get_full_analysis(symbol)
+    
+    st.write("DEBUG:", r)  # ← add this line temporarily
+
 import streamlit as st
 import plotly.graph_objects as go
 from datetime import datetime
