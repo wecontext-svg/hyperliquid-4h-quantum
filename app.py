@@ -1,9 +1,3 @@
-if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
-    with st.spinner("Running Quantum V2 Analysis..."):
-        r = get_full_analysis(symbol)
-    
-    st.write("DEBUG:", r)  # ← add this line temporarily
-
 import streamlit as st
 import plotly.graph_objects as go
 from datetime import datetime
@@ -22,13 +16,27 @@ symbol = custom.strip() if custom.strip() else selected
 
 # ── Analyze ───────────────────────────────────────────────
 if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
-    with st.spinner("Running Quantum V2 Analysis..."):
-        r = get_full_analysis(symbol)
+    import requests, time
 
-    df = r.get("df")
-    has_data = df is not None and not df.empty
+    coin = symbol.replace('xyz:', '')
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - 180 * 14_400_000
 
-    col1, col2 = st.columns([3, 2])
+    try:
+        resp = requests.post(
+            'https://api.hyperliquid.xyz/info',
+            json={'type': 'candleSnapshot', 'req': {
+                'coin': coin,
+                'interval': '4h',
+                'startTime': start_ms,
+                'endTime': end_ms
+            }},
+            timeout=10
+        )
+        st.write("Status:", resp.status_code)
+        st.write("Raw response:", resp.json()[:2])
+    except Exception as e:
+        st.error(f"API error: {e}")
 
     # ── Chart ─────────────────────────────────────────────
     with col1:
