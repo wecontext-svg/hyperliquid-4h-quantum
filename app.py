@@ -13,26 +13,29 @@ custom = st.sidebar.text_input("Or enter custom symbol", "")
 symbol = custom.strip() if custom.strip() else selected
 
 if st.button("🔥 TEST API", type="primary", use_container_width=True):
-    coin = symbol.replace('xyz:', '')
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - 180 * 14_400_000
 
-    st.write("Coin:", coin)
-    st.write("Start:", start_ms, "End:", end_ms)
+    tests = [
+        {"label": "NVDA 4h",  "coin": "NVDA",     "interval": "4h"},
+        {"label": "BTC 4h",   "coin": "BTC",       "interval": "4h"},
+        {"label": "NVDA 4H",  "coin": "NVDA",      "interval": "4H"},
+        {"label": "kNVDA 4h", "coin": "kNVDA",     "interval": "4h"},
+    ]
 
-    try:
-        resp = requests.post(
-            'https://api.hyperliquid.xyz/info',
-            json={'type': 'candleSnapshot', 'req': {
-                'coin': coin,
-                'interval': '4h',
-                'startTime': start_ms,
-                'endTime': end_ms
-            }},
-            timeout=10
-        )
-        st.write("Status code:", resp.status_code)
-        st.write("Raw response (first 500 chars):")
-        st.code(resp.text[:500])
-    except Exception as e:
+    for t in tests:
+        try:
+            resp = requests.post(
+                'https://api.hyperliquid.xyz/info',
+                json={'type': 'candleSnapshot', 'req': {
+                    'coin': t['coin'],
+                    'interval': t['interval'],
+                    'startTime': start_ms,
+                    'endTime': end_ms
+                }},
+                timeout=10
+            )
+            st.write(f"**{t['label']}** → Status: {resp.status_code} | Response: `{resp.text[:100]}`")
+        except Exception as e:
+            st.error(f"{t['label']} error: {e}")    except Exception as e:
         st.error(f"API error: {e}")
