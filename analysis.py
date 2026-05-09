@@ -15,9 +15,26 @@ INTERVAL_MS = {'4h': 14_400_000, '1d': 86_400_000}
 # DATA FETCHING
 # ─────────────────────────────────────────────
 
+def _normalize_symbol(symbol: str) -> str:
+    """Return the coin name as Hyperliquid expects it.
+    - Spot stocks traded via xyz: prefix → keep the full 'xyz:NVDA' form
+      because that is the coin identifier on Hyperliquid's spot market.
+    - Naked crypto tickers (BTC, ETH …) are passed as-is.
+    - Strips surrounding whitespace and normalises casing for the prefix.
+    """
+    s = symbol.strip()
+    lower = s.lower()
+    if lower.startswith('xyz:'):
+        # Reconstruct with correct casing: 'xyz:' + UPPER ticker
+        return 'xyz:' + s[4:].upper()
+    # For plain crypto tickers just upper-case them
+    return s.upper()
+
+
 def fetch_candles(symbol, interval='4h', limit=180):
-    coin = symbol.replace('xyz:', '')
-    end_ms = int(time.time() * 1000)
+    coin     = _normalize_symbol(symbol)
+    interval = interval.lower()          # API requires lowercase: '4h', '1d'
+    end_ms   = int(time.time() * 1000)
     start_ms = end_ms - limit * INTERVAL_MS.get(interval, 14_400_000)
     try:
         resp = requests.post(
@@ -28,7 +45,15 @@ def fetch_candles(symbol, interval='4h', limit=180):
             }},
             timeout=10
         )
-        data = resp.json()
+        print(f"{symbol} {interval} → Status: {resp.status_code} | Response: {resp.text[:120]}")
+        if not resp.ok:
+            print(f"fetch_candles: HTTP {resp.status_code} for coin={coin!r} interval={interval!r}")
+            return pd.DataFrame()
+        try:
+            data = resp.json()
+        except Exception as json_err:
+            print(f"fetch_candles: JSON parse error — {json_err} | body={resp.text[:200]}")
+            return pd.DataFrame()
         if not data:
             return pd.DataFrame()
         rows = [{
@@ -466,7 +491,11 @@ def quantum_weighted_confluence(df, symbol):
 
 
 def get_full_analysis(symbol):
-    df = fetch_candles(symbol, interval='4h', limit=180)
+    # Sanitize: reject clearly malformed symbols (must contain at least 2 alnum chars)
+    clean = symbol.strip()
+    if not clean or len([c for c in clean if c.isalnum()]) < 2:
+        return {'df': None, 'error': f'Invalid symbol: {symbol!r}'}
+    df = fetch_candles(clean, interval='4h', limit=180)
     if df.empty:
-        return {'df': None, 'error': 'No data fetched'}
-    return quantum_weighted_confluence(df, symbol)
+        return {'df': None, 'error': f'No data fetched for {_normalize_symbol(clean)}'}
+    return quantum_weighted_confluence(df, clean)
