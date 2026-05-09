@@ -92,37 +92,85 @@ def detect_swings(df: pd.DataFrame, strength: int = 5):
             lows.append({'time': df['timestamp'].iloc[i], 'price': float(df['low'].iloc[i])})
     return highs[-8:], lows[-8:]
 
+def get_structure_score(df, swing_highs, swing_lows, current_price):
+    # Phase 1: New swing-based BOS/CHOCH logic (as per your spec)
+    if len(swing_highs) < 3 or len(swing_lows) < 3:
+        return 50, "mixed"
+
+    # Last 6 swings
+    recent_highs = swing_highs[-6:]
+    recent_lows = swing_lows[-6:]
+
+    # Determine last confirmed swing high/low
+    last_swing_high = recent_highs[-1]['price'] if recent_highs else 0
+    last_swing_low = recent_lows[-1]['price'] if recent_lows else 0
+
+    # Check for BOS / CHOCH
+    bullish_bos = current_price > last_swing_high and df['close'].iloc[-1] > last_swing_high
+    bearish_bos = current_price < last_swing_low and df['close'].iloc[-1] < last_swing_low
+
+    # Simple sequence check for CHOCH (using last 2 swings)
+    if len(recent_highs) >= 2 and len(recent_lows) >= 2:
+        prev_high = recent_highs[-2]['price']
+        prev_low = recent_lows[-2]['price']
+        bullish_choch = (current_price > prev_low) and (df['close'].iloc[-1] > prev_low)  # reversal from bearish
+        bearish_choch = (current_price < prev_high) and (df['close'].iloc[-1] < prev_high)
+    else:
+        bullish_choch = bearish_choch = False
+
+    if bullish_bos:
+        score = 90
+        tag = "BOS"
+    elif bearish_bos:
+        score = 10
+        tag = "BOS"
+    elif bullish_choch:
+        score = 75
+        tag = "CHOCH"
+    elif bearish_choch:
+        score = 25
+        tag = "CHOCH"
+    else:
+        # Trending continuation or mixed
+        hh_hl = df['high'].iloc[-1] > df['high'].iloc[-2] and df['low'].iloc[-1] > df['low'].iloc[-2]
+        lh_ll = df['high'].iloc[-1] < df['high'].iloc[-2] and df['low'].iloc[-1] < df['low'].iloc[-2]
+        score = 65 if hh_hl else 35 if lh_ll else 50
+        tag = "continuation" if (hh_hl or lh_ll) else "mixed"
+
+    return score, tag
+
 def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
     if len(df) < 60 or df.empty:
         error = df.attrs.get('error', 'No candles returned') if hasattr(df, 'attrs') else "Insufficient data"
         return {"bias": "neutral", "confidence": 0, "reason": f"❌ ERROR: {error}", "target": None, "sl": None}
     
-    df = add_indicators(df)   # ← Now guaranteed when data exists
+    df = add_indicators(df)   
     current_price = float(df['close'].iloc[-1])
     ema50 = float(df['ema50'].iloc[-1])
     atr = float(df['atr'].iloc[-1]) if not pd.isna(df['atr'].iloc[-1]) else 1.0
     swing_highs, swing_lows = detect_swings(df)
     sell_liq = [h['price'] for h in swing_highs if h['price'] > current_price][-3:] or [current_price * 1.02]
     buy_liq = [l['price'] for l in swing_lows if l['price'] < current_price][-3:] or [current_price * 0.98]
-    recent = df.tail(8).reset_index(drop=True)
-    hh, hl = recent['high'].iloc[-1] > recent['high'].iloc[-2], recent['low'].iloc[-1] > recent['low'].iloc[-2]
-    lh, ll = recent['high'].iloc[-1] < recent['high'].iloc[-2], recent['low'].iloc[-1] < recent['low'].iloc[-2]
     last, prev = df.iloc[-1], df.iloc[-2]
     body = abs(last['close'] - last['open'])
     pinbar_bull = (last['low'] - min(last['open'], last['close'])) > 2 * body and last['close'] > last['open']
     pinbar_bear = (max(last['open'], last['close']) - last['high']) > 2 * body and last['close'] < last['open']
     engulf_bull = last['close'] > prev['high'] and last['open'] < prev['close']
     engulf_bear = last['close'] < prev['low'] and last['open'] > prev['close']
+
+    structure_score, structure_tag = get_structure_score(df, swing_highs, swing_lows, current_price)
+
     factors = {
-        "structure": 90 if (hh and hl) else 10 if (lh and ll) else 50,
+        "structure": structure_score,
         "liquidity": 95 if (last['low'] < buy_liq[0] and last['close'] > buy_liq[0]) else 95 if (last['high'] > sell_liq[0] and last['close'] < sell_liq[0]) else 40,
         "ema": 85 if current_price > ema50 else 15,
         "pattern": 90 if (pinbar_bull or engulf_bull) else 90 if (pinbar_bear or engulf_bear) else 45,
         "volatility": min(100, int(atr / current_price * 10000))
     }
-    weights = np.array([0.40, 0.30, 0.15, 0.10, 0.05])
-    amplitudes = np.sqrt(np.array(list(factors.values())) / 100.0)
-    raw_score = np.dot(amplitudes**2, weights) * 100
+    weights = np.array([0.40, 0.30, 0.15, 0.10, 0.05])  # V2 weights start here, but Phase 1 keeps old for other factors
+    # Linear normalization (Priority 1 - removed square root)
+    factor_array = np.array(list(factors.values())) / 100.0
+    raw_score = np.dot(factor_array, weights) * 100
     entanglement = 1.25 if sum(1 for v in factors.values() if v > 80) >= 3 else 1.0
     quantum_score = int(raw_score * entanglement)
     bias = "bullish" if quantum_score > 65 else "bearish" if quantum_score < 35 else "neutral"
@@ -135,7 +183,7 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
         sl = max(sell_liq) + 0.5 * atr
     else:
         target = sl = current_price
-    reasons = [f"{k.capitalize()}:{v}" for k, v in factors.items() if v > 60][:4]
+    reasons = [f"{k.capitalize()}:{v} ({structure_tag})" for k, v in factors.items() if v > 60][:4]
     reason_str = " | ".join(reasons) + f" | Entangle×{entanglement:.2f}"
     return {
         "bias": bias, "confidence": confidence, "reason": reason_str,
@@ -143,13 +191,14 @@ def quantum_weighted_confluence(df: pd.DataFrame) -> dict:
         "current_price": round(current_price, 2), "ema50": round(ema50, 2),
         "buy_liquidity": [round(x, 2) for x in buy_liq],
         "sell_liquidity": [round(x, 2) for x in sell_liq],
-        "quantum_score": quantum_score
+        "quantum_score": quantum_score,
+        "structure_tag": structure_tag  # new output
     }
 
 def get_full_analysis(symbol: str):
     df = fetch_candles(symbol)
     if not df.empty:
-        df = add_indicators(df)   # ← FIXED: Always add EMA50 for the chart
+        df = add_indicators(df)   
     analysis = quantum_weighted_confluence(df)
     analysis["symbol"] = symbol
     analysis["df"] = df
