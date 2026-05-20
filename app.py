@@ -19,11 +19,12 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
     with st.spinner("Running Quantum V2 Analysis..."):
         r = get_full_analysis(symbol)
 
-    df = r.get("df")
-    has_data = df is not None and not df.empty
+    if r.get('df') is None:
+        st.error(f"No data: {r.get('error', 'Unknown error')}")
+        st.stop()
 
-    if r.get("error"):
-        st.error(f"⚠️ {r['error']}")
+    df       = r['df']
+    has_data = not df.empty
 
     col1, col2 = st.columns([3, 2])
 
@@ -34,12 +35,8 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
 
         if has_data:
             fig.add_trace(go.Candlestick(
-                x=df['time'],
-                open=df['open'],
-                high=df['high'],
-                low=df['low'],
-                close=df['close'],
-                name="Price",
+                x=df['time'], open=df['open'], high=df['high'],
+                low=df['low'], close=df['close'], name="Price",
                 increasing_line_color='#26a69a',
                 decreasing_line_color='#ef5350'
             ))
@@ -47,8 +44,7 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
             if 'ema50' in df.columns:
                 fig.add_trace(go.Scatter(
                     x=df['time'], y=df['ema50'],
-                    line=dict(color='orange', width=1.5),
-                    name="EMA50"
+                    line=dict(color='orange', width=1.5), name="EMA50"
                 ))
 
             for h in r.get('swing_highs', [])[-8:]:
@@ -82,10 +78,18 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
                 fig.add_hline(y=r['target'],
                     line=dict(color='#26a69a', width=1.5, dash='dot'),
                     annotation_text=f"Target {r['target']}", annotation_font_size=10)
-        else:
-            fig.add_annotation(text="No chart data yet — stub mode",
-                xref="paper", yref="paper", x=0.5, y=0.5,
-                showarrow=False, font=dict(size=16, color="gray"))
+
+            if r.get('call_strike'):
+                fig.add_hline(y=r['call_strike'],
+                    line=dict(color='#9c27b0', width=1.5, dash='dot'),
+                    annotation_text=f"📈 Call OI {r['call_strike']}",
+                    annotation_font_size=10)
+
+            if r.get('put_strike'):
+                fig.add_hline(y=r['put_strike'],
+                    line=dict(color='#ff9800', width=1.5, dash='dot'),
+                    annotation_text=f"📉 Put OI {r['put_strike']}",
+                    annotation_font_size=10)
 
         fig.update_layout(
             template="plotly_dark", height=600,
@@ -98,90 +102,83 @@ if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
     with col2:
         st.subheader("Quantum V2 Analysis")
 
-        # Bias + Confidence
-        bias = r.get('bias', 'neutral')
-        conf = r.get('confidence', 0)
+        bias  = r.get('bias', 'neutral')
+        conf  = r.get('confidence', 0)
         score = r.get('score', 0)
         bias_icon = "🟢" if bias == 'bullish' else "🔴" if bias == 'bearish' else "⚪"
 
-        if conf >= 85:
-            conf_label = "HIGH CONVICTION"
-            conf_color = "normal"
-        elif conf >= 72:
-            conf_label = "VALID SETUP"
-            conf_color = "normal"
-        elif conf >= 51:
-            conf_label = "DEVELOPING"
-            conf_color = "off"
-        else:
-            conf_label = "WEAK / NO SETUP"
-            conf_color = "inverse"
+        if conf >= 85:   conf_label = "HIGH CONVICTION"
+        elif conf >= 72: conf_label = "VALID SETUP"
+        elif conf >= 51: conf_label = "DEVELOPING"
+        else:            conf_label = "WEAK / NO SETUP"
 
         st.metric("Bias", f"{bias_icon} {bias.upper()}", f"Q-Score: {score}  |  {conf}% — {conf_label}")
 
         st.divider()
 
-        # OTE flag
         if r.get('ote_flag'):
             st.success("⚡ OTE ZONE — Optimal Trade Entry")
 
-        # HTF alignment
         if r.get('hte_aligned'):
             st.markdown("**HTF:** ✅ Daily Aligned")
         else:
             st.markdown("**HTF:** ⚠️ Against Daily Structure")
 
-        # Premium / Discount
-        pd_raw = r.get('premium_discount', '')
-        st.markdown(f"**Entry Zone:** {pd_raw}")
+        st.markdown(f"**Entry Zone:** {r.get('premium_discount', '')}")
 
         st.divider()
 
-        # Factor scores
         st.markdown("**Factor Breakdown**")
         factors = [
-            ("Structure",     r.get('structure', 0),     r.get('structure_tag', '')),
-            ("Liquidity",     r.get('liquidity', 0),     ""),
-            ("Order Block",   r.get('order_block', 0),   ""),
-            ("FVG",           r.get('fvg', 0),           ""),
-            ("Displacement",  r.get('displacement', 0),  ""),
-            ("EMA",           r.get('ema', 0),           ""),
-            ("Volume",        r.get('volume', 0),        ""),
+            ("Structure",    r.get('structure', 0),    r.get('structure_tag', '')),
+            ("Liquidity",    r.get('liquidity', 0),    ""),
+            ("Order Block",  r.get('order_block', 0),  ""),
+            ("FVG",          r.get('fvg', 0),          ""),
+            ("Displacement", r.get('displacement', 0), ""),
+            ("EMA",          r.get('ema', 0),          ""),
+            ("Volume",       r.get('volume', 0),       ""),
         ]
 
         for name, val, tag in factors:
-            bar = int(val / 10)
+            bar    = int(val / 10)
             filled = "█" * bar
-            empty = "░" * (10 - bar)
-            color = "🟢" if val >= 75 else "🟡" if val >= 50 else "🔴"
-            label = f" ({tag})" if tag else ""
+            empty  = "░" * (10 - bar)
+            color  = "🟢" if val >= 75 else "🟡" if val >= 50 else "🔴"
+            label  = f" ({tag})" if tag else ""
             st.markdown(f"{color} **{name}{label}** {filled}{empty} `{val}`")
 
         st.markdown(f"**Entanglement:** ×{r.get('entanglement_multiplier', 1.0)}")
 
         st.divider()
 
-        # Levels
-        cp = r.get('current_price', 0)
+        # Options levels
+        if r.get('call_strike') or r.get('put_strike'):
+            st.markdown("**Weekly Options Flow**")
+            if r.get('call_strike'):
+                st.markdown(f"📈 Max Call OI Strike: `{r['call_strike']}`")
+            if r.get('put_strike'):
+                st.markdown(f"📉 Max Put OI Strike: `{r['put_strike']}`")
+            st.divider()
+
+        cp  = r.get('current_price', 0)
         tgt = r.get('target', 0)
-        sl = r.get('sl', 0)
+        sl  = r.get('sl', 0)
 
         if cp and tgt and sl:
-            reward = round(tgt - cp, 2) if bias == 'bullish' else round(cp - tgt, 2)
-            risk   = round(cp - sl, 2)  if bias == 'bullish' else round(sl - cp, 2)
-            rr     = round(reward / risk, 2) if risk > 0 else 0
+            reward = round(abs(tgt - cp), 4)
+            risk   = round(abs(cp - sl), 4)
+            rr     = r.get('rr', 0)
         else:
             reward = risk = rr = 0
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Entry",  f"{cp}")
-        c2.metric("Target", f"{tgt}", f"+{reward}" if bias == 'bullish' else f"-{reward}")
-        c3.metric("SL",     f"{sl}",  f"-{risk}"   if bias == 'bullish' else f"+{risk}")
+        c2.metric("Target", f"{tgt}", f"+{reward}" if bias != 'bearish' else f"-{reward}")
+        c3.metric("SL",     f"{sl}",  f"-{risk}"   if bias != 'bearish' else f"+{risk}")
 
         rr_color = "✅" if rr >= 2 else "⚠️"
         st.markdown(f"**R:R** {rr_color} `{rr}:1`")
 
         st.divider()
-
         st.caption(f"Reason: {r.get('reason', '')}")
         st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
