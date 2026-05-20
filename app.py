@@ -50,10 +50,17 @@ if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
 
     with st.spinner("Fetching options chain..."):
         try:
-            calls = fetch_options(symbol, 'call', expiry, api_key)
-            puts  = fetch_options(symbol, 'put',  expiry, api_key)
+            api_key = st.secrets.get("MASSIVE_API_KEY", "")
+            expiry  = get_weekly_expiry()
+            url     = f"https://api.massive.com/v1/snapshot/options/{symbol}/chain"
+            headers = {'Authorization': f'Bearer {api_key}'}
+            params  = {'expiration_date': expiry, 'contract_type': 'call', 'limit': 5}
+            resp    = requests.get(url, params=params, headers=headers, timeout=10)
+            st.write("Status:", resp.status_code)
+            st.code(resp.text[:500])
+            st.stop()
         except Exception as e:
-            st.error(f"API error: {e}")
+            st.error(f"Raw error: {e}")
             st.stop()
 
     if not calls and not puts:
