@@ -57,7 +57,7 @@ def fetch_options_levels(ticker):
 # ─────────────────────────────────────────────
 
 def fetch_candles(symbol, interval='4h', limit=180):
-    coin = symbol.replace('xyz:', '')
+    coin = symbol  # keep full format e.g. xyz:NVDA
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - limit * INTERVAL_MS.get(interval, 14_400_000)
     try:
