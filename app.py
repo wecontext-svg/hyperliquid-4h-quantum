@@ -35,6 +35,16 @@ if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
             st.error(f"Error: {e}")
             st.stop()
 
+    # Filter to ±20% of current price
+    lower = price * 0.80
+    upper = price * 1.20
+    calls = calls[(calls['strike'] >= lower) & (calls['strike'] <= upper)]
+    puts  = puts[(puts['strike'] >= lower)  & (puts['strike'] <= upper)]
+
+    if calls.empty or puts.empty:
+        st.error("No contracts found within ±20% of current price.")
+        st.stop()
+
     # Max OI strikes
     call_row    = calls.loc[calls['openInterest'].idxmax()]
     put_row     = puts.loc[puts['openInterest'].idxmax()]
