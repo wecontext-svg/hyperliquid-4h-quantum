@@ -31,6 +31,10 @@ if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
             calls  = chain.calls
             puts   = chain.puts
 
+            # Current price — fetch before filtering
+            info  = ticker.fast_info
+            price = round(info.last_price, 2)
+
         except Exception as e:
             st.error(f"Error: {e}")
             st.stop()
@@ -54,8 +58,7 @@ if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
     put_oi      = int(put_row['openInterest'])
 
     # Current price
-    info  = ticker.fast_info
-    price = round(info.last_price, 2)
+    price = price  # already fetched above
 
     # ── Metrics ───────────────────────────────
     st.divider()
