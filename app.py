@@ -1,184 +1,134 @@
 import streamlit as st
+import requests
 import plotly.graph_objects as go
-from datetime import datetime
-from analysis import get_full_analysis, SYMBOLS
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Hyperliquid Quantum V2", layout="wide", page_icon="⚡")
-st.title("⚡ Hyperliquid 4H Quantum V2 Analyzer")
-st.caption("Advanced ICT + Quantum Weighted Confluence")
+st.set_page_config(page_title="Options Flow Analyzer", layout="wide", page_icon="📊")
+st.title("📊 Weekly Options Flow Analyzer")
+st.caption("Max Call / Put OI Strike Levels")
 
-# ── Sidebar ──────────────────────────────────────────────
+SYMBOLS = ['NVDA', 'INTC', 'AMD', 'AAPL', 'AMZN', 'GOOGL', 'MSFT', 'PLTR', 'HOOD', 'ORCL', 'MU', 'SNDK']
+
+# ── Sidebar ───────────────────────────────────
 st.sidebar.header("Symbol")
-default_idx = SYMBOLS.index("xyz:NVDA") if "xyz:NVDA" in SYMBOLS else 0
-selected = st.sidebar.selectbox("Select symbol", SYMBOLS, index=default_idx)
-custom = st.sidebar.text_input("Or enter custom symbol (e.g. BTC)", "")
-symbol = custom.strip() if custom.strip() else selected
+selected = st.sidebar.selectbox("Select symbol", SYMBOLS)
+custom   = st.sidebar.text_input("Or enter custom ticker (e.g. TSLA)", "")
+symbol   = custom.strip().upper() if custom.strip() else selected
 
-# ── Analyze ───────────────────────────────────────────────
-if st.button("🔥 ANALYZE NOW", type="primary", use_container_width=True):
-    with st.spinner("Running Quantum V2 Analysis..."):
-        r = get_full_analysis(symbol)
+# ── Fetch Options Chain ───────────────────────
+def get_weekly_expiry():
+    today      = datetime.utcnow()
+    days_ahead = 4 - today.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    return (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
 
-    if r.get('df') is None:
-        st.error(f"No data: {r.get('error', 'Unknown error')}")
+def fetch_options(ticker, contract_type, expiry, api_key):
+    url    = f"https://api.massive.com/v1/snapshot/options/{ticker}/chain"
+    params = {'expiration_date': expiry, 'contract_type': contract_type, 'limit': 250}
+    headers = {'Authorization': f'Bearer {api_key}'}
+    resp   = requests.get(url, params=params, headers=headers, timeout=10)
+    return resp.json().get('results', [])
+
+def find_max_oi(contracts):
+    if not contracts:
+        return None, None
+    best = max(contracts, key=lambda x: x.get('open_interest', 0))
+    strike = best.get('details', {}).get('strike_price')
+    oi     = best.get('open_interest', 0)
+    return strike, oi
+
+# ── Analyze ───────────────────────────────────
+if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
+    api_key = st.secrets.get("MASSIVE_API_KEY", "")
+    if not api_key:
+        st.error("MASSIVE_API_KEY not found in Streamlit secrets.")
         st.stop()
 
-    df       = r['df']
-    has_data = not df.empty
+    expiry = get_weekly_expiry()
+    st.caption(f"Weekly expiry: {expiry}")
 
-    col1, col2 = st.columns([3, 2])
+    with st.spinner("Fetching options chain..."):
+        try:
+            calls = fetch_options(symbol, 'call', expiry, api_key)
+            puts  = fetch_options(symbol, 'put',  expiry, api_key)
+        except Exception as e:
+            st.error(f"API error: {e}")
+            st.stop()
 
-    # ── Chart ─────────────────────────────────────────────
-    with col1:
-        st.subheader(f"{symbol} • 4H Chart")
+    if not calls and not puts:
+        st.error("No options data returned. Check ticker or API key.")
+        st.stop()
+
+    call_strike, call_oi = find_max_oi(calls)
+    put_strike,  put_oi  = find_max_oi(puts)
+
+    # ── Metrics ───────────────────────────────
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("📈 Max Call OI Strike", f"${call_strike}" if call_strike else "N/A", f"{call_oi:,} contracts" if call_oi else "")
+    col2.metric("📉 Max Put OI Strike",  f"${put_strike}"  if put_strike  else "N/A", f"{put_oi:,} contracts"  if put_oi  else "")
+    if call_strike and put_strike:
+        mid = round((call_strike + put_strike) / 2, 2)
+        col3.metric("⚖️ Midpoint", f"${mid}", "Expected range center")
+
+    st.divider()
+
+    # ── OI Bar Chart ──────────────────────────
+    st.subheader("Open Interest by Strike")
+
+    all_contracts = []
+    for c in calls:
+        strike = c.get('details', {}).get('strike_price')
+        oi     = c.get('open_interest', 0)
+        if strike and oi:
+            all_contracts.append({'strike': strike, 'oi': oi, 'type': 'call'})
+    for p in puts:
+        strike = p.get('details', {}).get('strike_price')
+        oi     = p.get('open_interest', 0)
+        if strike and oi:
+            all_contracts.append({'strike': strike, 'oi': oi, 'type': 'put'})
+
+    if all_contracts:
+        call_data = sorted([x for x in all_contracts if x['type'] == 'call'], key=lambda x: x['strike'])
+        put_data  = sorted([x for x in all_contracts if x['type'] == 'put'],  key=lambda x: x['strike'])
+
         fig = go.Figure()
 
-        if has_data:
-            fig.add_trace(go.Candlestick(
-                x=df['time'], open=df['open'], high=df['high'],
-                low=df['low'], close=df['close'], name="Price",
-                increasing_line_color='#26a69a',
-                decreasing_line_color='#ef5350'
-            ))
+        fig.add_trace(go.Bar(
+            x=[x['strike'] for x in call_data],
+            y=[x['oi']     for x in call_data],
+            name='Calls', marker_color='#26a69a', opacity=0.8
+        ))
 
-            if 'ema50' in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df['time'], y=df['ema50'],
-                    line=dict(color='orange', width=1.5), name="EMA50"
-                ))
+        fig.add_trace(go.Bar(
+            x=[x['strike'] for x in put_data],
+            y=[x['oi']     for x in put_data],
+            name='Puts', marker_color='#ef5350', opacity=0.8
+        ))
 
-            for h in r.get('swing_highs', [])[-8:]:
-                fig.add_hline(y=h['price'],
-                    line=dict(color='rgba(239,83,80,0.5)', width=1, dash='dash'),
-                    annotation_text="Sell Liq", annotation_font_size=9)
+        if call_strike:
+            fig.add_vline(x=call_strike,
+                line=dict(color='#26a69a', width=2, dash='dash'),
+                annotation_text=f"Max Call OI ${call_strike}",
+                annotation_font_size=11)
 
-            for l in r.get('swing_lows', [])[-8:]:
-                fig.add_hline(y=l['price'],
-                    line=dict(color='rgba(38,166,154,0.5)', width=1, dash='dash'),
-                    annotation_text="Buy Liq", annotation_font_size=9)
-
-            ob = r.get('order_block_zone')
-            if ob:
-                fig.add_hrect(y0=ob['bottom'], y1=ob['top'],
-                    fillcolor='rgba(255,165,0,0.15)', line_width=0,
-                    annotation_text="Order Block", annotation_font_size=9)
-
-            fvg = r.get('fvg_zone')
-            if fvg:
-                fig.add_hrect(y0=fvg['bottom'], y1=fvg['top'],
-                    fillcolor='rgba(100,149,237,0.15)', line_width=0,
-                    annotation_text="FVG", annotation_font_size=9)
-
-            if r.get('sl'):
-                fig.add_hline(y=r['sl'],
-                    line=dict(color='#ef5350', width=1.5, dash='dot'),
-                    annotation_text=f"SL {r['sl']}", annotation_font_size=10)
-
-            if r.get('target'):
-                fig.add_hline(y=r['target'],
-                    line=dict(color='#26a69a', width=1.5, dash='dot'),
-                    annotation_text=f"Target {r['target']}", annotation_font_size=10)
-
-            if r.get('call_strike'):
-                fig.add_hline(y=r['call_strike'],
-                    line=dict(color='#9c27b0', width=1.5, dash='dot'),
-                    annotation_text=f"📈 Call OI {r['call_strike']}",
-                    annotation_font_size=10)
-
-            if r.get('put_strike'):
-                fig.add_hline(y=r['put_strike'],
-                    line=dict(color='#ff9800', width=1.5, dash='dot'),
-                    annotation_text=f"📉 Put OI {r['put_strike']}",
-                    annotation_font_size=10)
+        if put_strike:
+            fig.add_vline(x=put_strike,
+                line=dict(color='#ef5350', width=2, dash='dash'),
+                annotation_text=f"Max Put OI ${put_strike}",
+                annotation_font_size=11)
 
         fig.update_layout(
-            template="plotly_dark", height=600,
-            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=500,
+            xaxis_title="Strike Price",
+            yaxis_title="Open Interest",
+            barmode='overlay',
             margin=dict(l=0, r=0, t=30, b=0)
         )
+
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Analysis Panel ────────────────────────────────────
-    with col2:
-        st.subheader("Quantum V2 Analysis")
-
-        bias  = r.get('bias', 'neutral')
-        conf  = r.get('confidence', 0)
-        score = r.get('score', 0)
-        bias_icon = "🟢" if bias == 'bullish' else "🔴" if bias == 'bearish' else "⚪"
-
-        if conf >= 85:   conf_label = "HIGH CONVICTION"
-        elif conf >= 72: conf_label = "VALID SETUP"
-        elif conf >= 51: conf_label = "DEVELOPING"
-        else:            conf_label = "WEAK / NO SETUP"
-
-        st.metric("Bias", f"{bias_icon} {bias.upper()}", f"Q-Score: {score}  |  {conf}% — {conf_label}")
-
-        st.divider()
-
-        if r.get('ote_flag'):
-            st.success("⚡ OTE ZONE — Optimal Trade Entry")
-
-        if r.get('hte_aligned'):
-            st.markdown("**HTF:** ✅ Daily Aligned")
-        else:
-            st.markdown("**HTF:** ⚠️ Against Daily Structure")
-
-        st.markdown(f"**Entry Zone:** {r.get('premium_discount', '')}")
-
-        st.divider()
-
-        st.markdown("**Factor Breakdown**")
-        factors = [
-            ("Structure",    r.get('structure', 0),    r.get('structure_tag', '')),
-            ("Liquidity",    r.get('liquidity', 0),    ""),
-            ("Order Block",  r.get('order_block', 0),  ""),
-            ("FVG",          r.get('fvg', 0),          ""),
-            ("Displacement", r.get('displacement', 0), ""),
-            ("EMA",          r.get('ema', 0),          ""),
-            ("Volume",       r.get('volume', 0),       ""),
-        ]
-
-        for name, val, tag in factors:
-            bar    = int(val / 10)
-            filled = "█" * bar
-            empty  = "░" * (10 - bar)
-            color  = "🟢" if val >= 75 else "🟡" if val >= 50 else "🔴"
-            label  = f" ({tag})" if tag else ""
-            st.markdown(f"{color} **{name}{label}** {filled}{empty} `{val}`")
-
-        st.markdown(f"**Entanglement:** ×{r.get('entanglement_multiplier', 1.0)}")
-
-        st.divider()
-
-        # Options levels
-        if r.get('call_strike') or r.get('put_strike'):
-            st.markdown("**Weekly Options Flow**")
-            if r.get('call_strike'):
-                st.markdown(f"📈 Max Call OI Strike: `{r['call_strike']}`")
-            if r.get('put_strike'):
-                st.markdown(f"📉 Max Put OI Strike: `{r['put_strike']}`")
-            st.divider()
-
-        cp  = r.get('current_price', 0)
-        tgt = r.get('target', 0)
-        sl  = r.get('sl', 0)
-
-        if cp and tgt and sl:
-            reward = round(abs(tgt - cp), 4)
-            risk   = round(abs(cp - sl), 4)
-            rr     = r.get('rr', 0)
-        else:
-            reward = risk = rr = 0
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Entry",  f"{cp}")
-        c2.metric("Target", f"{tgt}", f"+{reward}" if bias != 'bearish' else f"-{reward}")
-        c3.metric("SL",     f"{sl}",  f"-{risk}"   if bias != 'bearish' else f"+{risk}")
-
-        rr_color = "✅" if rr >= 2 else "⚠️"
-        st.markdown(f"**R:R** {rr_color} `{rr}:1`")
-
-        st.divider()
-        st.caption(f"Reason: {r.get('reason', '')}")
-        st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"Last updated: {datetime.now().strftime('%H:%M:%S')} | Expiry: {expiry}")
