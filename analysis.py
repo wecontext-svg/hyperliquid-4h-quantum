@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import requests
 import time
+import streamlit as st
 
 SYMBOLS = [
     'xyz:SP500', 'xyz:MU', 'xyz:SNDK', 'xyz:NVDA', 'xyz:INTC',
@@ -12,29 +13,52 @@ SYMBOLS = [
 INTERVAL_MS = {'4h': 14_400_000, '1d': 86_400_000}
 
 # ─────────────────────────────────────────────
+# OPTIONS DATA — MASSIVE.COM
+# ─────────────────────────────────────────────
+
+def fetch_options_levels(ticker):
+    try:
+        api_key = st.secrets.get("MASSIVE_API_KEY", "")
+        if not api_key:
+            return None, None
+
+        ticker = ticker.replace('xyz:', '')
+
+        from datetime import datetime, timedelta
+        today = datetime.utcnow()
+        days_ahead = 4 - today.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        expiry = (today + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+
+        url = f"https://api.massive.com/v1/snapshot/options/{ticker}/chain"
+        headers = {'Authorization': f'Bearer {api_key}'}
+
+        resp_c = requests.get(url, params={'expiration_date': expiry, 'contract_type': 'call', 'limit': 250}, headers=headers, timeout=10)
+        calls  = resp_c.json().get('results', [])
+
+        resp_p = requests.get(url, params={'expiration_date': expiry, 'contract_type': 'put', 'limit': 250}, headers=headers, timeout=10)
+        puts   = resp_p.json().get('results', [])
+
+        max_call = max(calls, key=lambda x: x.get('open_interest', 0), default=None)
+        max_put  = max(puts,  key=lambda x: x.get('open_interest', 0), default=None)
+
+        call_strike = max_call['details']['strike_price'] if max_call else None
+        put_strike  = max_put['details']['strike_price']  if max_put  else None
+
+        return call_strike, put_strike
+
+    except Exception as e:
+        print(f"Massive API error: {e}")
+        return None, None
+
+# ─────────────────────────────────────────────
 # DATA FETCHING
 # ─────────────────────────────────────────────
 
-def _normalize_symbol(symbol: str) -> str:
-    """Return the coin name as Hyperliquid expects it.
-    - Spot stocks traded via xyz: prefix → keep the full 'xyz:NVDA' form
-      because that is the coin identifier on Hyperliquid's spot market.
-    - Naked crypto tickers (BTC, ETH …) are passed as-is.
-    - Strips surrounding whitespace and normalises casing for the prefix.
-    """
-    s = symbol.strip()
-    lower = s.lower()
-    if lower.startswith('xyz:'):
-        # Reconstruct with correct casing: 'xyz:' + UPPER ticker
-        return 'xyz:' + s[4:].upper()
-    # For plain crypto tickers just upper-case them
-    return s.upper()
-
-
 def fetch_candles(symbol, interval='4h', limit=180):
-    coin     = _normalize_symbol(symbol)
-    interval = interval.lower()          # API requires lowercase: '4h', '1d'
-    end_ms   = int(time.time() * 1000)
+    coin = symbol.replace('xyz:', '')
+    end_ms = int(time.time() * 1000)
     start_ms = end_ms - limit * INTERVAL_MS.get(interval, 14_400_000)
     try:
         resp = requests.post(
@@ -45,15 +69,7 @@ def fetch_candles(symbol, interval='4h', limit=180):
             }},
             timeout=10
         )
-        print(f"{symbol} {interval} → Status: {resp.status_code} | Response: {resp.text[:120]}")
-        if not resp.ok:
-            print(f"fetch_candles: HTTP {resp.status_code} for coin={coin!r} interval={interval!r}")
-            return pd.DataFrame()
-        try:
-            data = resp.json()
-        except Exception as json_err:
-            print(f"fetch_candles: JSON parse error — {json_err} | body={resp.text[:200]}")
-            return pd.DataFrame()
+        data = resp.json()
         if not data:
             return pd.DataFrame()
         rows = [{
@@ -94,16 +110,16 @@ def detect_swings(df, strength=5):
     return highs, lows
 
 # ─────────────────────────────────────────────
-# FACTOR 1 — STRUCTURE  (25%)
+# FACTOR 1 — STRUCTURE (25%)
 # ─────────────────────────────────────────────
 
 def score_structure(df, swing_highs, swing_lows):
-    last = df.iloc[-1]
     if len(swing_highs) < 2 or len(swing_lows) < 2:
         return 50, 'Neutral'
 
     last_sh, prev_sh = swing_highs[-1]['price'], swing_highs[-2]['price']
     last_sl, prev_sl = swing_lows[-1]['price'],  swing_lows[-2]['price']
+    last = df.iloc[-1]
 
     hh = last_sh > prev_sh
     hl = last_sl > prev_sl
@@ -119,21 +135,20 @@ def score_structure(df, swing_highs, swing_lows):
     return 50, 'Neutral'
 
 # ─────────────────────────────────────────────
-# FACTOR 2 — ORDER BLOCK  (20%)
+# FACTOR 2 — ORDER BLOCK (20%)
 # ─────────────────────────────────────────────
 
 def score_order_block(df, struct_tag, atr):
     if not any(x in struct_tag for x in ['BOS', 'CHOCH', 'Trend']):
         return 10, None
 
-    bullish = 'Bullish' in struct_tag
-    ob_zone, ob_idx = None, 0
+    bullish  = 'Bullish' in struct_tag
+    ob_zone  = None
+    ob_idx   = 0
 
     for i in range(len(df) - 2, max(len(df) - 40, 0), -1):
         c = df.iloc[i]
-        is_bear = c['close'] < c['open']
-        is_bull = c['close'] > c['open']
-        if (bullish and is_bear) or (not bullish and is_bull):
+        if (bullish and c['close'] < c['open']) or (not bullish and c['close'] > c['open']):
             ob_zone = {'top': max(c['open'], c['close']), 'bottom': min(c['open'], c['close'])}
             ob_idx  = i
             break
@@ -141,8 +156,8 @@ def score_order_block(df, struct_tag, atr):
     if ob_zone is None:
         return 10, None
 
-    current      = df.iloc[-1]['close']
-    candles_ago  = len(df) - 1 - ob_idx
+    current     = df.iloc[-1]['close']
+    candles_ago = len(df) - 1 - ob_idx
 
     if ob_zone['bottom'] <= current <= ob_zone['top']:
         score = 95
@@ -157,7 +172,7 @@ def score_order_block(df, struct_tag, atr):
     return score, ob_zone
 
 # ─────────────────────────────────────────────
-# FACTOR 3 — LIQUIDITY  (20%)
+# FACTOR 3 — LIQUIDITY (20%)
 # ─────────────────────────────────────────────
 
 def score_liquidity(df, swing_highs, swing_lows, atr):
@@ -171,20 +186,18 @@ def score_liquidity(df, swing_highs, swing_lows, atr):
     bear_raid = bool(sell_liq and last['high'] > sell_liq[0]  and last['close'] < sell_liq[0])
 
     if not bull_raid and not bear_raid:
-        return 20, None
+        return 50, None
 
     raid_level = buy_liq[-1] if bull_raid else sell_liq[0]
 
-    # A: level significance
     all_prices = sorted(set([s['price'] for s in swing_highs + swing_lows]))
-    idx = next((i for i, p in enumerate(all_prices) if p == raid_level), -1)
-    neighbors = []
-    if idx > 0:               neighbors.append(abs(raid_level - all_prices[idx-1]))
+    idx        = next((i for i, p in enumerate(all_prices) if p == raid_level), -1)
+    neighbors  = []
+    if idx > 0:                neighbors.append(abs(raid_level - all_prices[idx-1]))
     if idx < len(all_prices)-1: neighbors.append(abs(raid_level - all_prices[idx+1]))
     avg_dist = np.mean(neighbors) if neighbors else atr
-    score_a = 90 if avg_dist > 1.5 * atr else 55
+    score_a  = 90 if avg_dist > 1.5 * atr else 55
 
-    # B: wick quality
     body_bot = min(last['open'], last['close'])
     body_top = max(last['open'], last['close'])
     if bull_raid:
@@ -198,15 +211,14 @@ def score_liquidity(df, swing_highs, swing_lows, atr):
     elif fully_back:                          score_b = 65
     else:                                     score_b = 25
 
-    # C: multi-level sweep
-    swept = sum(1 for p in (buy_liq if bull_raid else sell_liq)
-                if (last['low'] < p if bull_raid else last['high'] > p))
+    swept   = sum(1 for p in (buy_liq if bull_raid else sell_liq)
+                  if (last['low'] < p if bull_raid else last['high'] > p))
     score_c = 90 if swept >= 2 else 60
 
     return int(score_a*0.4 + score_b*0.4 + score_c*0.2), raid_level
 
 # ─────────────────────────────────────────────
-# FACTOR 4 — FAIR VALUE GAP  (15%)
+# FACTOR 4 — FAIR VALUE GAP (15%)
 # ─────────────────────────────────────────────
 
 def score_fvg(df, struct_tag, atr):
@@ -216,24 +228,24 @@ def score_fvg(df, struct_tag, atr):
     for i in range(2, len(df) - 1):
         c0, c2 = df.iloc[i-2], df.iloc[i]
         if bullish and c0['high'] < c2['low']:
-            gap = {'top': c2['low'], 'bottom': c0['high'], 'index': i}
-            mid = (gap['top'] + gap['bottom']) / 2
+            gap   = {'top': c2['low'], 'bottom': c0['high'], 'index': i}
+            mid   = (gap['top'] + gap['bottom']) / 2
             later = df.iloc[i+1:]
             if not (not later.empty and (later['low'] <= mid).any()):
                 fvgs.append(gap)
         elif not bullish and c0['low'] > c2['high']:
-            gap = {'top': c0['low'], 'bottom': c2['high'], 'index': i}
-            mid = (gap['top'] + gap['bottom']) / 2
+            gap   = {'top': c0['low'], 'bottom': c2['high'], 'index': i}
+            mid   = (gap['top'] + gap['bottom']) / 2
             later = df.iloc[i+1:]
             if not (not later.empty and (later['high'] >= mid).any()):
                 fvgs.append(gap)
 
     if not fvgs:
-        return 10, None
+        return 50, None
 
-    fvg       = fvgs[-1]
-    current   = df.iloc[-1]['close']
-    gap_size  = fvg['top'] - fvg['bottom']
+    fvg         = fvgs[-1]
+    current     = df.iloc[-1]['close']
+    gap_size    = fvg['top'] - fvg['bottom']
     candles_ago = len(df) - 1 - fvg['index']
 
     if fvg['bottom'] <= current <= fvg['top']:
@@ -251,22 +263,22 @@ def score_fvg(df, struct_tag, atr):
     return score, fvg
 
 # ─────────────────────────────────────────────
-# FACTOR 5 — DISPLACEMENT  (10%)
+# FACTOR 5 — DISPLACEMENT (10%)
 # ─────────────────────────────────────────────
 
 def score_displacement(df, raid_level, atr, bullish):
     if raid_level is None or atr <= 0:
-        return 10
+        return 50
 
-    last = df.iloc[-1]
-    body = abs(last['close'] - last['open'])
+    last  = df.iloc[-1]
+    body  = abs(last['close'] - last['open'])
     ratio = body / atr
     rng   = last['high'] - last['low']
 
     correct_dir = (bullish and last['close'] > last['open']) or \
                   (not bullish and last['close'] < last['open'])
     if not correct_dir:
-        return 10
+        return 20
 
     close_pos = ((last['close'] - last['low']) / rng if bullish
                  else (last['high'] - last['close']) / rng) if rng > 0 else 0
@@ -277,27 +289,26 @@ def score_displacement(df, raid_level, atr, bullish):
     return 20
 
 # ─────────────────────────────────────────────
-# FACTOR 6 — EMA INTERACTION  (7%)
+# FACTOR 6 — EMA INTERACTION (7%)
 # ─────────────────────────────────────────────
 
 def score_ema(df):
     if 'ema50' not in df.columns or len(df) < 2:
         return 50
     last, prev = df.iloc[-1], df.iloc[-2]
-    ema     = last['ema50']
-    price   = last['close']
-    atr     = last['atr'] if 'atr' in df.columns else (last['high'] - last['low'])
+    ema   = last['ema50']
+    price = last['close']
 
     bounced   = prev['low']   <= ema * 1.003 and price > ema * 1.005
     reclaimed = prev['close'] < prev['ema50'] and price > ema
 
-    if bounced:   return 95
-    if reclaimed: return 80
+    if bounced:     return 95
+    if reclaimed:   return 80
     if price > ema: return 70 if abs(price-ema)/ema*100 < 1 else 65
     return 30 if abs(price-ema)/ema*100 < 1 else 20
 
 # ─────────────────────────────────────────────
-# FACTOR 7 — VOLUME  (3%)
+# FACTOR 7 — VOLUME (3%)
 # ─────────────────────────────────────────────
 
 def score_volume(df, raid_level):
@@ -314,7 +325,7 @@ def score_volume(df, raid_level):
     return 25
 
 # ─────────────────────────────────────────────
-# PREMIUM / DISCOUNT MODIFIER
+# PREMIUM / DISCOUNT
 # ─────────────────────────────────────────────
 
 def calc_premium_discount(df, bias):
@@ -323,7 +334,7 @@ def calc_premium_discount(df, bias):
     cur = df.iloc[-1]['close']
     rng = hi - lo
     if rng == 0:
-        return 50, f"50% — Fair Value"
+        return 50, "50% — Fair Value"
 
     pos = int((cur - lo) / rng * 100)
 
@@ -364,24 +375,23 @@ def quantum_weighted_confluence(df, symbol):
 
     swing_highs, swing_lows = detect_swings(df, strength=5)
 
-    # ── Factor scores ──────────────────────────
     struct_score, struct_tag = score_structure(df, swing_highs, swing_lows)
     ob_score,    ob_zone     = score_order_block(df, struct_tag, atr)
     liq_score,   raid_level  = score_liquidity(df, swing_highs, swing_lows, atr)
     fvg_score,   fvg_data    = score_fvg(df, struct_tag, atr)
-    
-    bullish   = struct_score >= 50
+
+    bullish    = 'Bullish' in struct_tag
     disp_score = score_displacement(df, raid_level, atr, bullish)
     ema_score  = score_ema(df)
     vol_score  = score_volume(df, raid_level)
 
-    # ── HTF penalty applied to structure ───────
+    # HTF penalty
     bias_prelim = 'bullish' if bullish else 'bearish'
     aligned     = htf_aligned(symbol, bias_prelim)
     if not aligned:
         struct_score = int(struct_score * 0.65)
 
-    # ── Weighted score (linear — no square root) ─
+    # Weighted score — linear, no square root
     raw = (struct_score * 0.25 +
            ob_score     * 0.20 +
            liq_score    * 0.20 +
@@ -390,13 +400,13 @@ def quantum_weighted_confluence(df, symbol):
            ema_score    * 0.07 +
            vol_score    * 0.03)
 
-    # ── Entanglement multiplier ─────────────────
+    # Entanglement multiplier
     scores       = [struct_score, ob_score, liq_score, fvg_score, disp_score, ema_score, vol_score]
     strong_count = sum(1 for s in scores if s > 75)
     has_bos      = any(x in struct_tag for x in ['BOS', 'CHOCH'])
 
     if disp_score < 40:
-        multiplier = 0.90
+        multiplier = 0.95
     elif strong_count >= 5:
         multiplier = 1.35
     elif strong_count >= 3 and has_bos:
@@ -406,11 +416,14 @@ def quantum_weighted_confluence(df, symbol):
 
     quantum_score = min(100, raw * multiplier)
 
-    # ── Premium / Discount modifier ─────────────
-    bias_prelim  = 'bullish' if quantum_score >= 50 else 'bearish'
-    pd_pos, pd_label = calc_premium_discount(df, bias_prelim)
+    # Bias from structure tag
+    if 'Bullish' in struct_tag:   bias_str = 'bullish'
+    elif 'Bearish' in struct_tag: bias_str = 'bearish'
+    else:                          bias_str = 'neutral'
 
-    if bias_prelim == 'bullish':
+    # Premium / Discount
+    pd_pos, pd_label = calc_premium_discount(df, bias_str)
+    if bias_str == 'bullish':
         if pd_pos < 35:   quantum_score = min(100, quantum_score * 1.10)
         elif pd_pos > 65: quantum_score *= 0.80
     else:
@@ -419,37 +432,32 @@ def quantum_weighted_confluence(df, symbol):
 
     quantum_score = round(quantum_score, 1)
 
-    # ── Final bias ──────────────────────────────
-    if quantum_score > 65:   bias_str = 'bullish'
-    elif quantum_score < 35: bias_str = 'bearish'
-    else:                    bias_str = 'neutral'
-
-    # ── OTE flag ────────────────────────────────
+    # OTE flag
     price_ok = (pd_pos < 40) if bias_str == 'bullish' else (pd_pos > 60)
     ote_flag = (ob_score >= 75 and fvg_score >= 75 and
                 liq_score >= 60 and has_bos and price_ok)
 
-    # ── SL & Target ─────────────────────────────
+    # SL & Target
     raid_candle = df.iloc[-2] if raid_level is not None else df.iloc[-1]
     sell_above  = [h['price'] for h in swing_highs if h['price'] > current]
     buy_below   = [l['price'] for l in swing_lows  if l['price'] < current]
 
-    if bias_str == 'bullish':
-        sl          = round(raid_candle['low']  - 0.1 * atr, 4)
-        min_target  = round(current + (current - sl) * 2, 4)
-        valid       = [p for p in sell_above if p >= min_target]
-        target      = round(valid[0] if valid else min_target, 4)
+    if bias_str != 'bearish':
+        sl         = round(raid_candle['low']  - 0.1 * atr, 4)
+        min_target = round(current + (current - sl) * 2, 4)
+        valid      = [p for p in sell_above if p >= min_target]
+        target     = round(valid[0] if valid else min_target, 4)
     else:
-        sl          = round(raid_candle['high'] + 0.1 * atr, 4)
-        min_target  = round(current - (sl - current) * 2, 4)
-        valid       = [p for p in buy_below if p <= min_target]
-        target      = round(valid[-1] if valid else min_target, 4)
+        sl         = round(raid_candle['high'] + 0.1 * atr, 4)
+        min_target = round(current - (sl - current) * 2, 4)
+        valid      = [p for p in buy_below if p <= min_target]
+        target     = round(valid[-1] if valid else min_target, 4)
 
     risk   = abs(current - sl)
     reward = abs(target  - current)
     rr     = round(reward / risk, 2) if risk > 0 else 0
 
-    # ── Reason string ───────────────────────────
+    # Reason string
     named = [('Structure', struct_score), ('OB', ob_score), ('Liquidity', liq_score),
              ('FVG', fvg_score), ('Displacement', disp_score), ('EMA', ema_score)]
     top4  = sorted(named, key=lambda x: x[1], reverse=True)[:4]
@@ -457,45 +465,45 @@ def quantum_weighted_confluence(df, symbol):
     if multiplier != 1.0:
         reason += f' | Entangle×{multiplier}'
 
-    fvg_zone = ({'top': fvg_data['top'], 'bottom': fvg_data['bottom']}
-                if fvg_data else None)
+    fvg_zone = ({'top': fvg_data['top'], 'bottom': fvg_data['bottom']} if fvg_data else None)
+
+    # Options levels
+    call_strike, put_strike = fetch_options_levels(symbol)
 
     return {
-        'df':                   df,
-        'bias':                 bias_str,
-        'confidence':           quantum_score,
-        'score':                quantum_score,
-        'structure':            struct_score,
-        'structure_tag':        struct_tag,
-        'liquidity':            liq_score,
-        'order_block':          ob_score,
-        'order_block_zone':     ob_zone,
-        'fvg':                  fvg_score,
-        'fvg_zone':             fvg_zone,
-        'displacement':         disp_score,
-        'ema':                  ema_score,
-        'volume':               vol_score,
+        'df':                      df,
+        'bias':                    bias_str,
+        'confidence':              quantum_score,
+        'score':                   quantum_score,
+        'structure':               struct_score,
+        'structure_tag':           struct_tag,
+        'liquidity':               liq_score,
+        'order_block':             ob_score,
+        'order_block_zone':        ob_zone,
+        'fvg':                     fvg_score,
+        'fvg_zone':                fvg_zone,
+        'displacement':            disp_score,
+        'ema':                     ema_score,
+        'volume':                  vol_score,
         'entanglement_multiplier': multiplier,
-        'ote_flag':             ote_flag,
-        'hte_aligned':          aligned,
-        'premium_discount':     pd_label,
-        'current_price':        round(current, 4),
-        'target':               target,
-        'sl':                   sl,
-        'rr':                   rr,
-        'reason':               reason,
-        'raid_candle_low':      round(raid_candle['low'], 4),
-        'swing_highs':          swing_highs,
-        'swing_lows':           swing_lows,
+        'ote_flag':                ote_flag,
+        'hte_aligned':             aligned,
+        'premium_discount':        pd_label,
+        'current_price':           round(current, 4),
+        'target':                  target,
+        'sl':                      sl,
+        'rr':                      rr,
+        'reason':                  reason,
+        'raid_candle_low':         round(raid_candle['low'], 4),
+        'swing_highs':             swing_highs,
+        'swing_lows':              swing_lows,
+        'call_strike':             call_strike,
+        'put_strike':              put_strike,
     }
 
 
 def get_full_analysis(symbol):
-    # Sanitize: reject clearly malformed symbols (must contain at least 2 alnum chars)
-    clean = symbol.strip()
-    if not clean or len([c for c in clean if c.isalnum()]) < 2:
-        return {'df': None, 'error': f'Invalid symbol: {symbol!r}'}
-    df = fetch_candles(clean, interval='4h', limit=180)
+    df = fetch_candles(symbol, interval='4h', limit=180)
     if df.empty:
-        return {'df': None, 'error': f'No data fetched for {_normalize_symbol(clean)}'}
-    return quantum_weighted_confluence(df, clean)
+        return {'df': None, 'error': 'No data fetched'}
+    return quantum_weighted_confluence(df, symbol)
