@@ -31,13 +31,19 @@ def calc_max_pain(calls, puts):
     return max_pain_strike
 
 def calc_iv_skew(calls, puts, price):
-    atm = min(calls['strike'].tolist(), key=lambda x: abs(x - price))
-    call_iv = calls[calls['strike'] == atm]['impliedVolatility'].values
-    put_iv  = puts[puts['strike']   == atm]['impliedVolatility'].values
-    if len(call_iv) == 0 or len(put_iv) == 0:
+    # Find ATM strike — closest to current price with valid IV on both sides
+    strikes = sorted(set(calls['strike'].tolist()) & set(puts['strike'].tolist()))
+    if not strikes:
         return None, None, None
-    skew = round((put_iv[0] - call_iv[0]) * 100, 2)
-    return round(call_iv[0] * 100, 2), round(put_iv[0] * 100, 2), skew
+
+    for atm in sorted(strikes, key=lambda x: abs(x - price)):
+        call_iv = calls[(calls['strike'] == atm) & (calls['impliedVolatility'] > 0)]['impliedVolatility'].values
+        put_iv  = puts[(puts['strike']   == atm) & (puts['impliedVolatility']  > 0)]['impliedVolatility'].values
+        if len(call_iv) > 0 and len(put_iv) > 0:
+            skew = round((put_iv[0] - call_iv[0]) * 100, 2)
+            return round(call_iv[0] * 100, 2), round(put_iv[0] * 100, 2), skew
+
+    return None, None, None
 
 def calc_unusual_volume(calls, puts):
     # Volume/OI ratio > 2 = unusual activity
