@@ -100,7 +100,9 @@ if st.button("🔥 ANALYZE OPTIONS", type="primary", use_container_width=True):
         st.error("No contracts found within ±20% of current price.")
         st.stop()
 
-    # ── Core calculations ─────────────────────
+    # DEBUG — show available columns
+    st.write("Call columns:", calls_f.columns.tolist())
+    st.stop()
     call_row    = calls_f.loc[calls_f['openInterest'].idxmax()]
     put_row     = puts_f.loc[puts_f['openInterest'].idxmax()]
     call_strike = call_row['strike']
